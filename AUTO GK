@@ -1,0 +1,448 @@
+-- ═══════════════════════════════════════════════════════════
+--     AUTO GK - VERSÃO DINÂMICA + DETECÇÃO DE CHUTE
+--     Hitbox que aumenta/diminui + Dive automático ao detectar chute
+-- ═══════════════════════════════════════════════════════════
+
+wait(1)
+print("=" .. string.rep("=", 50))
+print("🔄 INICIANDO AUTO GK DINÂMICO + CHUTE DETECTION")
+print("=" .. string.rep("=", 50))
+
+-- Serviços
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+-- Player
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local rootPart = character:WaitForChild("HumanoidRootPart")
+local humanoid = character:WaitForChild("Humanoid")
+
+print("✅ Player carregado: " .. player.Name)
+
+-- Config
+local Config = {
+    Enabled = false,
+    ShowHitbox = true,
+    MinSize = 70,        -- Tamanho MÍNIMO (quando bola perto)
+    MaxSize = 170,       -- Tamanho MÁXIMO (quando bola longe)
+    MaxDistance = 150,   -- Distância onde hitbox fica no máximo
+}
+
+-- Variáveis
+local ball = nil
+local dynamicBox = nil
+local lastDive = 0
+local connection = nil
+local shootConnection = nil
+
+-- BUSCAR BOLA
+local function FindBall()
+    print("🔍 Procurando bola...")
+    
+    local names = {"Ball", "ball", "Football", "football", "SoccerBall", "soccer"}
+    
+    -- Busca direta no Workspace
+    for _, name in ipairs(names) do
+        local found = Workspace:FindFirstChild(name)
+        if found and found:IsA("BasePart") then
+            print("✅ BOLA ENCONTRADA: " .. name)
+            return found
+        end
+    end
+    
+    -- Busca em descendants
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            for _, name in ipairs(names) do
+                if obj.Name == name then
+                    print("✅ BOLA ENCONTRADA: " .. name .. " (Descendant)")
+                    return obj
+                end
+            end
+        end
+    end
+    
+    print("❌ Bola NÃO encontrada!")
+    return nil
+end
+
+-- CRIAR HITBOX DINÂMICA
+local function CreateDynamicBox()
+    local box = Instance.new("Part")
+    box.Name = "DynamicHitbox"
+    box.Size = Vector3.new(Config.MaxSize, Config.MaxSize * 0.8, Config.MaxSize)
+    box.Anchored = true
+    box.CanCollide = false
+    box.Transparency = 0.7
+    box.Color = Color3.fromRGB(0, 255, 0)
+    box.Material = Enum.Material.Neon
+    box.CFrame = rootPart.CFrame
+    box.Parent = Workspace
+    
+    local selection = Instance.new("SelectionBox")
+    selection.Adornee = box
+    selection.Color3 = Color3.fromRGB(0, 255, 0)
+    selection.LineThickness = 0.1
+    selection.Parent = box
+    
+    print("📦 Hitbox dinâmica criada! (Min: " .. Config.MinSize .. " | Max: " .. Config.MaxSize .. ")")
+    
+    return box
+end
+
+-- CALCULAR TAMANHO DA HITBOX BASEADO NA DISTÂNCIA
+local function CalculateBoxSize(distance)
+    if distance >= Config.MaxDistance then
+        return Config.MaxSize
+    end
+    
+    -- Interpolação linear entre MinSize e MaxSize
+    local ratio = distance / Config.MaxDistance
+    local size = Config.MinSize + (Config.MaxSize - Config.MinSize) * ratio
+    
+    return math.clamp(size, Config.MinSize, Config.MaxSize)
+end
+
+-- VERIFICAR SE BOLA ESTÁ DENTRO
+local function IsInBox(box)
+    if not ball or not ball.Parent then 
+        return false 
+    end
+    
+    if not box or not box.Parent then 
+        return false 
+    end
+    
+    local ballPos = ball.Position
+    local boxPos = box.Position
+    local boxSize = box.Size
+    
+    -- Distância simples
+    local distance = (ballPos - boxPos).Magnitude
+    
+    -- Raio da box
+    local radius = (boxSize.X + boxSize.Y + boxSize.Z) / 6
+    
+    return distance <= radius
+end
+
+-- PEGAR DIREÇÃO
+local function GetDirection(pos)
+    local relative = rootPart.CFrame:PointToObjectSpace(pos)
+    
+    local direction
+    if math.abs(relative.X) > math.abs(relative.Z) then
+        direction = relative.X > 0 and "right" or "left"
+    else
+        direction = "front"
+    end
+    
+    return direction
+end
+
+-- EXECUTAR DIVE
+local function Dive(direction)
+    local now = tick()
+    if now - lastDive < 0.3 then 
+        return false
+    end
+    
+    local remote = ReplicatedStorage:FindFirstChild("GKDIVERE")
+    
+    if not remote then
+        print("❌ REMOTE 'GKDIVERE' NÃO ENCONTRADO!")
+        return false
+    end
+    
+    local success, err = pcall(function()
+        remote:FireServer(rootPart.CFrame, direction)
+    end)
+    
+    if success then
+        lastDive = now
+        print("=" .. string.rep("=", 50))
+        print("✅ DIVE EXECUTADO!")
+        print("   Direção: " .. direction)
+        print("=" .. string.rep("=", 50))
+        
+        -- Feedback visual
+        if dynamicBox then
+            dynamicBox.Color = Color3.fromRGB(255, 0, 0)
+            task.delay(0.5, function()
+                if dynamicBox then
+                    dynamicBox.Color = Color3.fromRGB(0, 255, 0)
+                end
+            end)
+        end
+        
+        -- Anti-slow
+        task.spawn(function()
+            for i = 1, 20 do
+                if humanoid then
+                    humanoid.WalkSpeed = 16
+                end
+                task.wait(0.1)
+            end
+        end)
+        
+        return true
+    else
+        print("❌ ERRO AO EXECUTAR DIVE: " .. tostring(err))
+        return false
+    end
+end
+
+-- DETECTAR CHUTE (MONITOR ShootRE)
+local function SetupShootDetection()
+    local shootRE = ReplicatedStorage:FindFirstChild("ShootRE")
+    
+    if not shootRE then
+        print("⚠️ ShootRE não encontrado! Detecção de chute desativada.")
+        return
+    end
+    
+    print("✅ ShootRE encontrado! Monitorando chutes...")
+    
+    -- Hook no OnClientEvent (se for RemoteEvent)
+    if shootRE:IsA("RemoteEvent") then
+        shootConnection = shootRE.OnClientEvent:Connect(function(...)
+            if not Config.Enabled then return end
+            if not ball or not ball.Parent then return end
+            if not dynamicBox then return end
+            
+            -- Verifica se bola está na hitbox
+            if IsInBox(dynamicBox) then
+                print("🎯 CHUTE DETECTADO + BOLA NA HITBOX!")
+                print("   Executando dive imediato...")
+                
+                local direction = GetDirection(ball.Position)
+                Dive(direction)
+            end
+        end)
+    end
+end
+
+-- LOOP PRINCIPAL
+local frameCount = 0
+local function MainLoop()
+    frameCount = frameCount + 1
+    
+    if not Config.Enabled then return end
+    
+    -- Atualiza referências
+    if frameCount % 60 == 0 then
+        if not character or not character.Parent then
+            character = player.Character
+            if character then
+                rootPart = character:FindFirstChild("HumanoidRootPart")
+                humanoid = character:FindFirstChild("Humanoid")
+            end
+        end
+    end
+    
+    if not rootPart then return end
+    
+    -- Busca bola se perdeu
+    if not ball or not ball.Parent then
+        ball = FindBall()
+        if not ball then return end
+    end
+    
+    if not dynamicBox then return end
+    
+    -- CALCULA DISTÂNCIA DA BOLA
+    local distance = (ball.Position - rootPart.Position).Magnitude
+    
+    -- AJUSTA TAMANHO DA HITBOX
+    local newSize = CalculateBoxSize(distance)
+    dynamicBox.Size = Vector3.new(newSize, newSize * 0.8, newSize)
+    
+    -- Atualiza posição da hitbox
+    dynamicBox.CFrame = rootPart.CFrame
+    
+    -- Atualiza visibilidade
+    dynamicBox.Transparency = Config.ShowHitbox and 0.7 or 1
+    
+    -- VERIFICA SE BOLA ENTROU NA HITBOX (detecção por velocidade)
+    if IsInBox(dynamicBox) then
+        local vel = ball.AssemblyLinearVelocity or ball.Velocity or Vector3.zero
+        local speed = vel.Magnitude
+        
+        -- Só dá dive se bola estiver em movimento
+        if speed > 0.5 then
+            print("🎯 BOLA NA HITBOX!")
+            print("   Distância: " .. math.floor(distance))
+            print("   Tamanho da box: " .. math.floor(newSize))
+            print("   Velocidade: " .. string.format("%.2f", speed))
+            
+            Dive(GetDirection(ball.Position))
+            task.wait(0.5) -- Previne spam
+        end
+    end
+end
+
+-- ==================== GUI ====================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.ResetOnSpawn = false
+pcall(function() ScreenGui.Parent = game.CoreGui end)
+if not ScreenGui.Parent then
+    ScreenGui.Parent = player.PlayerGui
+end
+
+local Frame = Instance.new("Frame")
+Frame.Parent = ScreenGui
+Frame.Size = UDim2.new(0, 240, 0, 260)
+Frame.Position = UDim2.new(0, 10, 0.5, -130)
+Frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+Frame.BorderSizePixel = 0
+Frame.Active = true
+Frame.Draggable = true
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 12)
+Corner.Parent = Frame
+
+local Border = Instance.new("UIStroke")
+Border.Color = Color3.fromRGB(0, 255, 0)
+Border.Thickness = 3
+Border.Parent = Frame
+
+-- Background
+local BgImg = Instance.new("ImageLabel")
+BgImg.Parent = Frame
+BgImg.Size = UDim2.new(1, 0, 1, 0)
+BgImg.BackgroundTransparency = 1
+BgImg.Image = "rbxassetid://103746370470693"
+BgImg.ImageTransparency = 0.7
+BgImg.ScaleType = Enum.ScaleType.Crop
+BgImg.ZIndex = 0
+
+local BgCorner = Instance.new("UICorner")
+BgCorner.CornerRadius = UDim.new(0, 12)
+BgCorner.Parent = BgImg
+
+-- Título
+local Title = Instance.new("TextLabel")
+Title.Parent = Frame
+Title.Size = UDim2.new(1, 0, 0, 40)
+Title.BackgroundTransparency = 1
+Title.Text = "AUTO GK DINÂMICO"
+Title.TextColor3 = Color3.fromRGB(0, 255, 0)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 18
+Title.ZIndex = 2
+
+-- Toggle ON/OFF
+local Toggle = Instance.new("TextButton")
+Toggle.Parent = Frame
+Toggle.Size = UDim2.new(0.9, 0, 0, 40)
+Toggle.Position = UDim2.new(0.05, 0, 0.18, 0)
+Toggle.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+Toggle.Text = "● OFF"
+Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+Toggle.Font = Enum.Font.GothamBold
+Toggle.TextSize = 16
+Toggle.BorderSizePixel = 0
+Toggle.ZIndex = 2
+
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(0, 8)
+ToggleCorner.Parent = Toggle
+
+-- Toggle VER HITBOX
+local ViewToggle = Instance.new("TextButton")
+ViewToggle.Parent = Frame
+ViewToggle.Size = UDim2.new(0.9, 0, 0, 40)
+ViewToggle.Position = UDim2.new(0.05, 0, 0.4, 0)
+ViewToggle.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+ViewToggle.Text = "👁 Ver Hitbox: ON"
+ViewToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+ViewToggle.Font = Enum.Font.GothamBold
+ViewToggle.TextSize = 14
+ViewToggle.BorderSizePixel = 0
+ViewToggle.ZIndex = 2
+
+local ViewCorner = Instance.new("UICorner")
+ViewCorner.CornerRadius = UDim.new(0, 8)
+ViewCorner.Parent = ViewToggle
+
+-- Status
+local Status = Instance.new("TextLabel")
+Status.Parent = Frame
+Status.Size = UDim2.new(1, 0, 0, 80)
+Status.Position = UDim2.new(0, 0, 0.65, 0)
+Status.BackgroundTransparency = 1
+Status.Text = "⚠️ Sistema Desativado\n\n💡 Hitbox dinâmica\n⚽ Detecção de chute ativa"
+Status.TextColor3 = Color3.fromRGB(200, 200, 200)
+Status.Font = Enum.Font.Gotham
+Status.TextSize = 10
+Status.ZIndex = 2
+Status.TextWrapped = true
+
+-- ==================== EVENTOS ====================
+Toggle.MouseButton1Click:Connect(function()
+    Config.Enabled = not Config.Enabled
+    
+    if Config.Enabled then
+        print("=" .. string.rep("=", 50))
+        print("🟢 AUTO GK ATIVADO!")
+        print("=" .. string.rep("=", 50))
+        
+        Toggle.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+        Toggle.Text = "● ON"
+        Border.Color = Color3.fromRGB(0, 255, 0)
+        Status.Text = "✅ Sistema Ativo!\n\n📏 Min: " .. Config.MinSize .. " | Max: " .. Config.MaxSize .. "\n⚽ Detecção: Ativa"
+        Status.TextColor3 = Color3.fromRGB(0, 255, 0)
+        
+        ball = FindBall()
+        dynamicBox = CreateDynamicBox()
+        SetupShootDetection()
+        
+        if not connection then
+            connection = RunService.Heartbeat:Connect(MainLoop)
+        end
+    else
+        print("=" .. string.rep("=", 50))
+        print("🔴 AUTO GK DESATIVADO!")
+        print("=" .. string.rep("=", 50))
+        
+        Toggle.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+        Toggle.Text = "● OFF"
+        Border.Color = Color3.fromRGB(255, 0, 0)
+        Status.Text = "⛔ Sistema Desativado"
+        Status.TextColor3 = Color3.fromRGB(255, 0, 0)
+        
+        if dynamicBox then dynamicBox:Destroy() dynamicBox = nil end
+        if connection then connection:Disconnect() connection = nil end
+        if shootConnection then shootConnection:Disconnect() shootConnection = nil end
+    end
+end)
+
+ViewToggle.MouseButton1Click:Connect(function()
+    Config.ShowHitbox = not Config.ShowHitbox
+    
+    if Config.ShowHitbox then
+        ViewToggle.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+        ViewToggle.Text = "👁 Ver Hitbox: ON"
+        print("👁 Hitbox visível")
+    else
+        ViewToggle.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+        ViewToggle.Text = "👁 Ver Hitbox: OFF"
+        print("👁 Hitbox invisível")
+    end
+end)
+
+player.CharacterAdded:Connect(function(char)
+    character = char
+    rootPart = char:WaitForChild("HumanoidRootPart")
+    humanoid = char:WaitForChild("Humanoid")
+end)
+
+print("=" .. string.rep("=", 50))
+print("✅ AUTO GK DINÂMICO CARREGADO!")
+print("   Min: " .. Config.MinSize .. " | Max: " .. Config.MaxSize)
+print("   🎯 Detecção de chute: Ativa")
+print("=" .. string.rep("=", 50))
